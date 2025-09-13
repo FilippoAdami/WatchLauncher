@@ -7,4 +7,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="green_battery">#00C853</color>
+    <color name="yellow_battery">#FFD600</color>
+    <color name="red_battery">#D50000</color>
 </resources>

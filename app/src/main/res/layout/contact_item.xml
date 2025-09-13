@@ -12,7 +12,7 @@
         android:layout_height="wrap_content"
         android:text="Contact Name"
         android:textColor="#FFFFFF"
-        android:textSize="20sp"
-        android:padding="8dp" />
+        android:textSize="35sp"
+        android:padding="4dp" />
 
 </LinearLayout>

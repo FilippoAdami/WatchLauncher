@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlin.math.abs
-import kotlin.math.min
 import kotlin.math.pow
 
 class CarouselLayoutManager(context: Context) : LinearLayoutManager(context, RecyclerView.VERTICAL, false) {

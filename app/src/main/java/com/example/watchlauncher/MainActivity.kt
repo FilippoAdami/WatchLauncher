@@ -1,9 +1,14 @@
 package com.example.watchlauncher
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -11,6 +16,7 @@ import android.telephony.TelephonyManager
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -26,11 +32,10 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private val emergencyContacts = mutableListOf(
-        ContactInfo("Dr. Smith", "1234567890"),
-        ContactInfo("Family", "0987654321"),
-        ContactInfo("Friend Jane", "1122334455"),
-        ContactInfo("Neighbor", "9988776655"),
-        ContactInfo("Emergency", "112")
+        ContactInfo("Son", "3333333333"),
+        ContactInfo("Daughter", "3333333333"),
+        ContactInfo("Uncle", "3333333333"),
+        ContactInfo("112", "112"),
     )
 
     private lateinit var contactsRecyclerView: RecyclerView
@@ -41,13 +46,21 @@ class MainActivity : AppCompatActivity() {
     private val clockHandler = Handler(Looper.getMainLooper())
     private val idleTimeout: Long = 10000 // 10 seconds
     private val CALL_PHONE_PERMISSION_REQUEST_CODE = 101
-    // Manually define the rotary encoder constant for older devices
-    private val SOURCE_ROTARY_ENCODER = 0x00001000
-    private var isSnapping = false
+
+    private var lastScrollTime: Long = 0
 
     private val dimScreenRunnable = Runnable {
         dimmableViews.forEach { view ->
             view.alpha = 0.5f
+        }
+    }
+
+    private lateinit var batteryIndicatorView: View
+
+    private val batteryReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            updateBatteryIndicator(level)
         }
     }
 
@@ -63,6 +76,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Hide the status bar for an immersive, full-screen experience
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+
         setContentView(R.layout.activity_main)
 
         // Request CALL_PHONE permission
@@ -75,6 +92,8 @@ class MainActivity : AppCompatActivity() {
         dimmableViews.add(findViewById(R.id.date_text))
         dimmableViews.add(findViewById(R.id.contacts_recycler_view))
         resetDimTimer()
+
+        batteryIndicatorView = findViewById(R.id.battery_indicator)
 
         // Set up clock and date
         clockHandler.post(updateClockRunnable)
@@ -92,6 +111,9 @@ class MainActivity : AppCompatActivity() {
 
         // Start the recycler view in the middle for infinite scrolling
         contactsRecyclerView.scrollToPosition(Int.MAX_VALUE / 2)
+        contactsRecyclerView.post {
+            contactsRecyclerView.smoothScrollBy(0, 10)
+        }
 
         // Override back button behavior
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -99,30 +121,62 @@ class MainActivity : AppCompatActivity() {
                 // Do nothing to prevent the app from closing
             }
         })
-    }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        // Handle physical button presses
-        if (keyCode == KeyEvent.KEYCODE_STEM_PRIMARY) {
-            startCall(emergencyContacts[carouselLayoutManager.getCenterItemPosition()].phoneNumber)
-            return true
+        // Register the battery receiver
+        val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { filter ->
+            this.registerReceiver(batteryReceiver, filter)
         }
-        return super.onKeyDown(keyCode, event)
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        updateBatteryIndicator(level)
     }
 
+    // The onGenericMotionEvent is handled at the Activity level
     override fun onGenericMotionEvent(event: MotionEvent?): Boolean {
-        if (event?.action == MotionEvent.ACTION_SCROLL && event.isFromSource(SOURCE_ROTARY_ENCODER)) {
-            // Handle rotary wheel scrolling
-            contactsRecyclerView.smoothScrollBy(0, (event.getAxisValue(MotionEvent.AXIS_VSCROLL) * 50).toInt())
+        if (event?.action == MotionEvent.ACTION_SCROLL) {
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastScrollTime > 400) {
+                val scrollValue = event.getAxisValue(MotionEvent.AXIS_SCROLL).toInt()
+                // Dispatch the scroll command to the custom function
+                smoothScrollVerticallyBy(scrollValue)
+                lastScrollTime = currentTime
+            }
             resetDimTimer()
             return true
         }
         return super.onGenericMotionEvent(event)
     }
 
+    private fun smoothScrollVerticallyBy(direction: Int) {
+        // Find the height of a single item to know how far to scroll
+        val childView = contactsRecyclerView.getChildAt(0)
+        val itemHeight = childView?.height ?: 0
+
+        // Use 150% of the item's height to ensure the snap helper is triggered
+        val scrollDistance = (direction * itemHeight*1.2).toInt()
+
+        contactsRecyclerView.smoothScrollBy(0, scrollDistance)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == 131) {
+            val selectedPosition = carouselLayoutManager.getCenterItemPosition()
+            val contact = emergencyContacts[selectedPosition % emergencyContacts.size]
+            startCall(contact.phoneNumber)
+            resetDimTimer()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onUserInteraction() {
         super.onUserInteraction()
         resetDimTimer()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(batteryReceiver)
+        clockHandler.removeCallbacks(updateClockRunnable)
     }
 
     private fun resetDimTimer() {
@@ -132,6 +186,17 @@ class MainActivity : AppCompatActivity() {
         }
         handler.postDelayed(dimScreenRunnable, idleTimeout)
     }
+
+    private fun updateBatteryIndicator(level: Int) {
+        val color = when {
+            level > 30 -> ContextCompat.getColor(this, R.color.green_battery)
+            level in 20..30 -> ContextCompat.getColor(this, R.color.yellow_battery)
+            else -> ContextCompat.getColor(this, R.color.red_battery)
+        }
+        val drawable = batteryIndicatorView.background as? GradientDrawable
+        drawable?.setColor(color)
+    }
+
 
     private fun startCall(phoneNumber: String) {
         val tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
