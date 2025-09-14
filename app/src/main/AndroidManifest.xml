@@ -4,6 +4,8 @@
 
     <!-- Permission to make phone calls -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Declares that this app is for a watch device -->
     <uses-feature android:name="android.hardware.type.watch" android:required="true" />
