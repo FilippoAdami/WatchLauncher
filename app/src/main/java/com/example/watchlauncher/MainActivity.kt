@@ -12,8 +12,8 @@ import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.telephony.PhoneStateListener
-import android.telephony.TelephonyManager
+import android.util.Log
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -24,351 +24,188 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.recyclerview.widget.LinearSnapHelper
-import androidx.recyclerview.widget.RecyclerView
+import androidx.core.net.toUri
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import android.media.MediaRecorder
-import java.io.IOException
 
 private const val emergency_number = "890"
+private const val PERMISSION_REQUEST_CODE = 100
 
 class MainActivity : AppCompatActivity() {
 
     private val emergencyContacts = mutableListOf(
+        ContactInfo("Emergency", emergency_number),
         ContactInfo("Filippo", "3711421801"),
         ContactInfo("Casa Andrea", "042381677"),
         ContactInfo("Dionisia", "3497227733"),
-        ContactInfo("Andrea", "3392132313"),
-        ContactInfo("Emergency", emergency_number)
+        ContactInfo("Andrea", "3392132313")
     )
 
-    private lateinit var contactsRecyclerView: RecyclerView
-    private lateinit var contactsAdapter: ContactsAdapter
-    private lateinit var carouselLayoutManager: CarouselLayoutManager
-    private val dimmableViews: MutableList<View> = mutableListOf()
-    private val handler = Handler(Looper.getMainLooper())
-    private val clockHandler = Handler(Looper.getMainLooper())
-    private val idleTimeout: Long = 10000 // 10 seconds
-    private val PERMISSION_REQUEST_CODE = 101
-
-    private var lastScrollTime: Long = 0
+    private var currentContactIndex = 0
     private var isSequentialCalling = false
+    private var lastScrollTime: Long = 0
 
-    private val dimScreenRunnable: Runnable = object : Runnable {
-        override fun run() {
-            dimmableViews.forEach { view ->
-                view.alpha = 0.5f
-            }
-        }
-    }
-
+    // UI elements
+    private lateinit var timeTextView: TextView
+    private lateinit var dateTextView: TextView
     private lateinit var batteryIndicatorView: View
+    private lateinit var contactPreviousTextView: TextView
+    private lateinit var contactCurrentTextView: TextView
+    private lateinit var contactNextTextView: TextView
 
-    private val batteryReceiver: BroadcastReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-            updateBatteryIndicator(level)
-        }
-    }
-
-    private val updateClockRunnable: Runnable = object : Runnable {
-        override fun run() {
-            val currentTime = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-            val currentDate = SimpleDateFormat("EEE, d MMM", Locale.getDefault()).format(Date())
-            findViewById<TextView>(R.id.clock_text).text = currentTime
-            findViewById<TextView>(R.id.date_text).text = currentDate
-            clockHandler.postDelayed(this, 1000)
-        }
-    }
-
-    private lateinit var telephonyManager: TelephonyManager
-    private var isCalling = false
-    private var currentCallingPosition = -1
-    private var isUserSpeaking = false // New variable to track if the user is speaking
-
-    private val callTimeoutHandler = Handler(Looper.getMainLooper())
-    private val callTimeoutRunnable: Runnable = object : Runnable {
-        override fun run() {
-            if (!isCalling) return
-
-            // If the timeout is reached, it means the call wasn't answered by a person.
-            // We stop listening to the current state and try the next contact.
-            telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
-            callNextContactInSequence()
-        }
-    }
-
-    private val micCheckHandler = Handler(Looper.getMainLooper())
-    private val micCheckRunnable: Runnable = object : Runnable {
-        override fun run() {
-            // If the mic check timer expires, it means no speaking was detected.
-            stopMicrophoneCheck()
-            // We can now move on to the next contact.
-            callNextContactInSequence()
-        }
-    }
-
-    private var mediaRecorder: MediaRecorder? = null
-
-    private fun startMicrophoneCheck() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Microphone permission is required for this feature.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        mediaRecorder = MediaRecorder().apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
-            setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
-            setOutputFile("/dev/null")
-            try {
-                prepare()
-                start()
-                isUserSpeaking = false
-                micCheckHandler.postDelayed(micCheckRunnable, 5000) // 5 second timer
-                // Start a background check for amplitude
-                Thread {
-                    while (isCalling) {
-                        if (getAmplitude() > 1000) { // A threshold to detect sound
-                            isUserSpeaking = true
-                            stopMicrophoneCheck()
-                            break
-                        }
-                        Thread.sleep(100)
-                    }
-                }.start()
-            } catch (e: IOException) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun stopMicrophoneCheck() {
-        micCheckHandler.removeCallbacks(micCheckRunnable)
-        if (mediaRecorder != null) {
-            mediaRecorder?.stop()
-            mediaRecorder?.release()
-            mediaRecorder = null
-        }
-    }
-
-    private fun getAmplitude(): Int {
-        return mediaRecorder?.maxAmplitude ?: 0
-    }
-
-    private val phoneStateListener = object : PhoneStateListener() {
-        override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-            super.onCallStateChanged(state, phoneNumber)
-            when (state) {
-                TelephonyManager.CALL_STATE_RINGING -> {
-                    // Start the 15-second timer
-                    callTimeoutHandler.postDelayed(callTimeoutRunnable, 15000)
-                }
-                TelephonyManager.CALL_STATE_OFFHOOK -> {
-                    // Call is answered (either human or voicemail), cancel the 15-second timer
-                    callTimeoutHandler.removeCallbacks(callTimeoutRunnable)
-                    // Start the microphone check
-                    startMicrophoneCheck()
-                }
-                TelephonyManager.CALL_STATE_IDLE -> {
-                    // Call has ended.
-                    if (isSequentialCalling) {
-                        stopMicrophoneCheck()
-                        // If the user was speaking, we stop the sequence.
-                        if (isUserSpeaking) {
-                            isSequentialCalling = false
-                        } else {
-                            // If no speaking was detected, the micCheckRunnable will continue to the next call.
-                            callNextContactInSequence()
-                        }
-                    }
-                }
-            }
-        }
+    // Screen management
+    private val idleTimeout: Long = 10000 // 10 seconds
+    private val handler = Handler(Looper.getMainLooper())
+    private val dimScreenRunnable = Runnable {
+        // Allows the screen to turn off after inactivity
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         // Hide the status bar for an immersive, full-screen experience
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-
         setContentView(R.layout.activity_main)
 
-        // Request all permissions at once
-        val permissionsToRequest = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.CALL_PHONE)
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.READ_PHONE_STATE)
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
-        }
-
-        if (permissionsToRequest.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, permissionsToRequest.toTypedArray(), PERMISSION_REQUEST_CODE)
-        }
-
-        // Initialize UI components and dimmable views
-        dimmableViews.add(findViewById(R.id.clock_text))
-        dimmableViews.add(findViewById(R.id.date_text))
-        dimmableViews.add(findViewById(R.id.contacts_recycler_view))
-        resetDimTimer()
-
+        // Find UI elements with corrected IDs
+        timeTextView = findViewById(R.id.clock_text)
+        dateTextView = findViewById(R.id.date_text)
         batteryIndicatorView = findViewById(R.id.battery_indicator)
+        contactPreviousTextView = findViewById(R.id.prev_contact)
+        contactCurrentTextView = findViewById(R.id.current_contact)
+        contactNextTextView = findViewById(R.id.next_contact)
 
-        // Set up clock and date
-        clockHandler.post(updateClockRunnable)
-
-        // Set up the RecyclerView with the custom CarouselLayoutManager
-        contactsRecyclerView = findViewById(R.id.contacts_recycler_view)
-        carouselLayoutManager = CarouselLayoutManager(this)
-        contactsRecyclerView.layoutManager = carouselLayoutManager
-        contactsAdapter = ContactsAdapter(this, emergencyContacts)
-        contactsRecyclerView.adapter = contactsAdapter
-
-        // Use a LinearSnapHelper to automatically snap to the center item
-        val snapHelper = LinearSnapHelper()
-        snapHelper.attachToRecyclerView(contactsRecyclerView)
-
-        // Start the recycler view in the middle for infinite scrolling
-        contactsRecyclerView.scrollToPosition(Int.MAX_VALUE / 2)
-
-        // This makes sure the list is perfectly centered on startup
-        contactsRecyclerView.post {
-            contactsRecyclerView.smoothScrollBy(0, 10)
-        }
-
-        // Override back button behavior
+        // Set up the back button callback
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Do nothing to prevent the app from closing
+                isSequentialCalling = false
+                Toast.makeText(this@MainActivity, "Emergency calling stopped.", Toast.LENGTH_SHORT).show()
             }
         })
 
-        // Register the battery receiver
-        val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { filter ->
-            this.registerReceiver(batteryReceiver, filter)
-        }
-        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        updateBatteryIndicator(level)
-
-        // Initialize TelephonyManager
-        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+        // Initialize UI and listeners
+        updateUI()
+        updateContactTextViews()
+        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        resetDimTimer()
+        requestPermissions()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            for (i in permissions.indices) {
-                when (permissions[i]) {
-                    Manifest.permission.CALL_PHONE -> {
-                        if (grantResults[i] == PackageManager.PERMISSION_GRANTED) {
-                            Toast.makeText(this, "Call permission granted.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(this, "Call permission denied.", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    Manifest.permission.READ_PHONE_STATE -> {
-                        if (grantResults[i] == PackageManager.PERMISSION_GRANTED) {
-                            Toast.makeText(this, "Phone state permission granted.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(this, "Phone state permission denied.", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    Manifest.permission.RECORD_AUDIO -> {
-                        if (grantResults[i] == PackageManager.PERMISSION_GRANTED) {
-                            Toast.makeText(this, "Audio permission granted.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(this, "Audio permission denied.", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
-        }
+    override fun onStart() {
+        super.onStart()
+        // Ensure the screen is on when the app becomes visible
+        resetDimTimer()
     }
 
-    // The onGenericMotionEvent is handled at the Activity level
-    override fun onGenericMotionEvent(event: MotionEvent?): Boolean {
-        if (event?.action == MotionEvent.ACTION_SCROLL) {
+    override fun onStop() {
+        super.onStop()
+        // Stop the screen dimming timer when the app is no longer visible
+        handler.removeCallbacks(dimScreenRunnable)
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.action == MotionEvent.ACTION_SCROLL && event.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)) {
+            // Implement debouncing to handle multiple events per single step
             val currentTime = System.currentTimeMillis()
-            if (currentTime - lastScrollTime > 350) {
-                val scrollValue = event.getAxisValue(MotionEvent.AXIS_SCROLL).toInt()
-
-                // Dispatch the scroll command to the custom function
-                smoothScrollVerticallyBy(scrollValue)
-
-                lastScrollTime = currentTime
+            if (currentTime - lastScrollTime < 400) {
+                return true
             }
-            resetDimTimer()
+            lastScrollTime = currentTime
+
+            // Handle rotary wheel scrolls
+            val delta = -event.getAxisValue(MotionEvent.AXIS_SCROLL)
+            if (delta > 0) {
+                // Scroll forward
+                currentContactIndex = (currentContactIndex + 1) % emergencyContacts.size
+            } else {
+                // Scroll backward
+                currentContactIndex = (currentContactIndex - 1 + emergencyContacts.size) % emergencyContacts.size
+            }
+            updateContactTextViews()
             return true
         }
         return super.onGenericMotionEvent(event)
     }
 
-    private fun smoothScrollVerticallyBy(direction: Int) {
-        // Find the height of a single item to know how far to scroll
-        val childView = contactsRecyclerView.getChildAt(0)
-        val itemHeight = childView?.height ?: 0
-
-        // Use 150% of the item's height to ensure the snap helper is triggered
-        val scrollDistance = (direction * itemHeight)
-
-        contactsRecyclerView.smoothScrollBy(0, scrollDistance)
-    }
-
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == 131) {
-            if (isSequentialCalling) {
-                isSequentialCalling = false
-                Toast.makeText(this, "Calling sequence stopped.", Toast.LENGTH_SHORT).show()
-            } else {
-                currentCallingPosition = carouselLayoutManager.getCenterItemPosition() % emergencyContacts.size
-                isSequentialCalling = true
-                startSequentialCall()
-            }
-            resetDimTimer()
+            // Handle rotary wheel button press (KEY_131)
+            val selectedContact = emergencyContacts[currentContactIndex]
+            makeCall(selectedContact.phoneNumber)
             return true
         }
         return super.onKeyDown(keyCode, event)
     }
 
-    private fun startSequentialCall() {
-        if (!isSequentialCalling) return
-        val currentContact = emergencyContacts[currentCallingPosition]
-        startCall(currentContact.phoneNumber)
+    private fun requestPermissions() {
+        val permissions = arrayOf(
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.RECORD_AUDIO
+        )
+        val permissionsToRequest = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }.toTypedArray()
+
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, permissionsToRequest, PERMISSION_REQUEST_CODE)
+        }
     }
 
-    private fun callNextContactInSequence() {
-        if (!isSequentialCalling) return
-
-        // Scroll to the next position
-        smoothScrollVerticallyBy(1)
-
-        // Wait a small delay for the scroll to complete before getting the new position
-        Handler(Looper.getMainLooper()).postDelayed({
-            currentCallingPosition = carouselLayoutManager.getCenterItemPosition() % emergencyContacts.size
-            val nextContact = emergencyContacts[currentCallingPosition]
-
-            // If the next contact is the emergency number, we scroll again to skip it.
-            if (nextContact.phoneNumber == emergency_number) {
-                contactsRecyclerView.smoothScrollBy(0, 1)
-                Handler(Looper.getMainLooper()).postDelayed({
-                    currentCallingPosition = carouselLayoutManager.getCenterItemPosition() % emergencyContacts.size
-                    // Now we are at the final position, call this number.
-                    val finalContact = emergencyContacts[currentCallingPosition]
-                    startCall(finalContact.phoneNumber)
-                }, 500)
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (allGranted) {
+                Toast.makeText(this, "Permissions granted.", Toast.LENGTH_SHORT).show()
             } else {
-                // It's a regular contact, so we call it.
-                startCall(nextContact.phoneNumber)
+                Toast.makeText(this, "Some permissions were denied. The app may not function correctly.", Toast.LENGTH_LONG).show()
             }
-        }, 500)
+        }
+    }
+
+    private fun updateUI() {
+        // Update time and date
+        val dateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
+        val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val date = Date()
+        dateTextView.text = dateFormat.format(date)
+        timeTextView.text = timeFormat.format(date)
+        handler.postDelayed({ updateUI() }, 1000)
+    }
+
+    private fun updateContactTextViews() {
+        val previousIndex = (currentContactIndex - 1 + emergencyContacts.size) % emergencyContacts.size
+        val nextIndex = (currentContactIndex + 1) % emergencyContacts.size
+
+        contactPreviousTextView.text = emergencyContacts[previousIndex].name
+        contactCurrentTextView.text = emergencyContacts[currentContactIndex].name
+        contactNextTextView.text = emergencyContacts[nextIndex].name
+
+        // Ensure all three TextViews are always fully opaque (white)
+        contactPreviousTextView.alpha = 1.0f
+        contactCurrentTextView.alpha = 1.0f
+        contactNextTextView.alpha = 1.0f
+    }
+
+    private fun makeCall(phoneNumber: String) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Call permission is required to make a call.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            val callIntent = Intent(Intent.ACTION_CALL)
+            callIntent.data = "tel:$phoneNumber".toUri()
+            startActivity(callIntent)
+        } catch (e: SecurityException) {
+            Log.e("MainActivity", "Security exception when starting call", e)
+            Toast.makeText(this, "Call permission required", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onUserInteraction() {
@@ -376,18 +213,12 @@ class MainActivity : AppCompatActivity() {
         resetDimTimer()
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        unregisterReceiver(batteryReceiver)
-        clockHandler.removeCallbacks(updateClockRunnable)
-        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
-    }
-
     private fun resetDimTimer() {
+        // Keep the screen on
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Reset the timer to turn the screen off
         handler.removeCallbacks(dimScreenRunnable)
-        dimmableViews.forEach { view ->
-            view.alpha = 1.0f
-        }
         handler.postDelayed(dimScreenRunnable, idleTimeout)
     }
 
@@ -401,16 +232,10 @@ class MainActivity : AppCompatActivity() {
         drawable?.setColor(color)
     }
 
-    private fun startCall(phoneNumber: String) {
-        telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
-        callTimeoutHandler.postDelayed(callTimeoutRunnable, 15000)
-
-        try {
-            val callIntent = Intent(Intent.ACTION_CALL)
-            callIntent.data = Uri.parse("tel:$phoneNumber")
-            startActivity(callIntent)
-        } catch (e: SecurityException) {
-            isCalling = false
+    private val batteryReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            updateBatteryIndicator(level)
         }
     }
 
